@@ -2,9 +2,13 @@ package sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"modernc.org/sqlite"
+	"strings"
+	"urlshortener/internal/storage"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type Storage struct {
@@ -14,25 +18,92 @@ type Storage struct {
 func New(storagePath string) (*Storage, error) {
 	const op = "storage.sqlite.New"
 
-	db, err := sql.Open("sqlite3", storagePath)
+	// Для modernc.org/sqlite
+	dsn := "file:" + storagePath + "?cache=shared&mode=rwc"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	stmt, err := db.Prepare(`
-	CREATE TABLE IF NOT EXISTS url(
-		id INTEGER PRIMARY KEY,
-		alias TEXT NOT NULL UNIQUE,
-		url TEXT NOT NULL);
-	CREATE INDEX IF NOT EXISTS idx_alias ON url(alias);
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("#{op}: #{err}")
+	// Проверяем соединение
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
 
-	_, err = stmt.Exec()
+	// Создаем таблицы
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS url(
+			id INTEGER PRIMARY KEY,
+			alias TEXT NOT NULL UNIQUE,
+			url TEXT NOT NULL
+		)
+	`)
 	if err != nil {
-		return nil, fmt.Errorf("#{op}: #{err}")
+		return nil, fmt.Errorf("%s: %w", op, err)
 	}
+
+	_, err = db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_alias ON url(alias)
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+
 	return &Storage{db: db}, nil
+}
+
+func (s *Storage) SaveURL(urlToSave string, alias string) (int64, error) {
+	const op = "storage.sqlite.SaveURL"
+
+	stmt, err := s.db.Prepare("INSERT INTO url(url, alias) VALUES(?, ?)")
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+	defer stmt.Close()
+
+	res, err := stmt.Exec(urlToSave, alias)
+	if err != nil {
+		// Проверяем ошибку уникальности для modernc.org/sqlite
+		if sqliteErr, ok := err.(*sqlite.Error); ok {
+			if sqliteErr.Code() == 2067 { // SQLITE_CONSTRAINT_UNIQUE
+				return 0, fmt.Errorf("%s: %w", op, storage.ErrURLExists)
+			}
+		}
+
+		// Дополнительная проверка по тексту ошибки
+		if strings.Contains(err.Error(), "constraint failed") {
+			return 0, fmt.Errorf("%s: %w", op, storage.ErrURLExists)
+		}
+
+		return 0, fmt.Errorf("%s: %w", op, err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("%s: failed to get last insert id: %w", op, err)
+	}
+
+	return id, nil
+}
+
+func (s *Storage) GetURL(alias string) (string, error) {
+	const op = "storage.sqlite.GetURL"
+
+	stmt, err := s.db.Prepare("SELECT url FROM url WHERE alias = ?")
+	if err != nil {
+		return "", fmt.Errorf("%s: prepare statement: %w", op, err)
+	}
+
+	var resURL string
+
+	err = stmt.QueryRow(alias).Scan(&resURL)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", storage.ErrURLNotFound
+		}
+
+		return "", fmt.Errorf("%s: execute statement: %w", op, err)
+	}
+
+	return resURL, nil
 }
