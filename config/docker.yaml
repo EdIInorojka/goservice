@@ -1,0 +1,18 @@
+env: "local"
+
+storage:
+  type: "postgres"
+  postgres:
+    host: "postgres"
+    port: 5432
+    user: "postgres"
+    password: "password"
+    dbname: "urlshortener"
+    sslmode: "disable"
+
+http_server:
+  address: "0.0.0.0:8082"
+  user: "admin"
+  password: "password"
+  timeout: 10s
+  idle_timeout: 60s

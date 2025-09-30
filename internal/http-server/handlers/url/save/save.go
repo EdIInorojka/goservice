@@ -1,110 +1,92 @@
 package save
 
 import (
+	"encoding/json"
 	"errors"
-	"github.com/go-playground/validator/v10"
-	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
-	"log/slog"
-
-	resp "urlshortener/internal/lib/api/response"
 	"urlshortener/internal/lib/logger/sl"
-	"urlshortener/internal/lib/random"
 	"urlshortener/internal/storage"
 )
 
 type Request struct {
-	URL   string `json:"url" validate:"required,url"`
+	URL   string `json:"url"`
 	Alias string `json:"alias,omitempty"`
 }
 
 type Response struct {
-	resp.Response
-	Alias string `json:"alias,omitempty"`
+	Status string `json:"status"`
+	Alias  string `json:"alias,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
-// TODO: move to config if needed
-const aliasLength = 6
-
-//go:generate go run github.com/vektra/mockery/v2@v2.35.4 --name=URLSaver
+// URLSaver интерфейс для сохранения URL
 type URLSaver interface {
-	SaveURL(urlToSave string, alias string) (int64, error)
+	SaveURL(urlToSave string, alias string) error
 }
 
 func New(log *slog.Logger, urlSaver URLSaver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		const op = "handlers.url.save.New"
 
-		log := log.With(
+		log = log.With(
 			slog.String("op", op),
 			slog.String("request_id", middleware.GetReqID(r.Context())),
 		)
 
 		var req Request
 
-		err := render.DecodeJSON(r.Body, &req)
-		if errors.Is(err, io.EOF) {
-			// Такую ошибку встретим, если получили запрос с пустым телом.
-			// Обработаем её отдельно
-			log.Error("request body is empty")
-
-			render.JSON(w, r, resp.Error("empty request"))
-
-			return
-		}
+		err := json.NewDecoder(r.Body).Decode(&req)
 		if err != nil {
 			log.Error("failed to decode request body", sl.Err(err))
 
-			render.JSON(w, r, resp.Error("failed to decode request"))
-
+			render.JSON(w, r, Error("failed to decode request"))
 			return
 		}
 
 		log.Info("request body decoded", slog.Any("request", req))
 
-		if err := validator.New().Struct(req); err != nil {
-			validateErr := err.(validator.ValidationErrors)
-
-			log.Error("invalid request", sl.Err(err))
-
-			render.JSON(w, r, resp.ValidationError(validateErr))
-
+		if req.URL == "" {
+			log.Error("url is required")
+			render.JSON(w, r, Error("url is required"))
 			return
 		}
 
-		alias := req.Alias
-		if alias == "" {
-			alias = random.NewRandomString(aliasLength)
+		// Если alias не предоставлен, генерируем его
+		if req.Alias == "" {
+			// TODO: generate alias
+			req.Alias = "example" // временно, нужно реализовать генерацию
 		}
 
-		id, err := urlSaver.SaveURL(req.URL, alias)
-		if errors.Is(err, storage.ErrURLExists) {
-			log.Info("url already exists", slog.String("url", req.URL))
-
-			render.JSON(w, r, resp.Error("url already exists"))
-
-			return
-		}
+		err = urlSaver.SaveURL(req.URL, req.Alias)
 		if err != nil {
-			log.Error("failed to add url", sl.Err(err))
+			if errors.Is(err, storage.ErrURLExists) {
+				log.Info("url already exists", slog.String("alias", req.Alias))
+				render.JSON(w, r, Error("url already exists"))
+				return
+			}
 
-			render.JSON(w, r, resp.Error("failed to add url"))
-
+			log.Error("failed to save url", sl.Err(err))
+			render.JSON(w, r, Error("failed to save url"))
 			return
 		}
 
-		log.Info("url added", slog.Int64("id", id))
+		log.Info("url saved", slog.String("alias", req.Alias))
 
-		responseOK(w, r, alias)
+		render.JSON(w, r, Response{
+			Status: "ok",
+			Alias:  req.Alias,
+		})
 	}
 }
 
-func responseOK(w http.ResponseWriter, r *http.Request, alias string) {
-	render.JSON(w, r, Response{
-		Response: resp.OK(),
-		Alias:    alias,
-	})
+// Error возвращает Response с ошибкой
+func Error(msg string) Response {
+	return Response{
+		Status: "error",
+		Error:  msg,
+	}
 }

@@ -2,28 +2,24 @@ package delete
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
-	"urlshortener/internal/lib/api/response"
-	"urlshortener/internal/lib/logger/sl"
-	"urlshortener/internal/storage"
-
+	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
-	"log/slog"
+	"urlshortener/internal/lib/logger/sl"
+	"urlshortener/internal/storage"
 )
 
-type Request struct {
-	Alias string `json:"alias"`
+// URLDeleter интерфейс для удаления URL
+type URLDeleter interface {
+	DeleteURL(alias string) error
 }
 
 type Response struct {
-	response.Response
-}
-
-//go:generate go run github.com/vektra/mockery/v2@v2.28.2 --name=URLDeleter
-type URLDeleter interface {
-	DeleteURL(alias string) error
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
 }
 
 func New(log *slog.Logger, urlDeleter URLDeleter) http.HandlerFunc {
@@ -35,47 +31,38 @@ func New(log *slog.Logger, urlDeleter URLDeleter) http.HandlerFunc {
 			slog.String("request_id", middleware.GetReqID(r.Context())),
 		)
 
-		var req Request
-
-		err := render.DecodeJSON(r.Body, &req)
-		if err != nil {
-			log.Error("failed to decode request body", sl.Err(err))
-
-			render.JSON(w, r, response.Error("failed to decode request"))
-
-			return
-		}
-
-		log.Info("request body decoded", slog.Any("request", req))
-
-		if req.Alias == "" {
+		alias := chi.URLParam(r, "alias")
+		if alias == "" {
 			log.Info("alias is empty")
-
-			render.JSON(w, r, response.Error("alias is required"))
-
+			render.JSON(w, r, Error("alias is required"))
 			return
 		}
 
-		err = urlDeleter.DeleteURL(req.Alias)
-		if errors.Is(err, storage.ErrURLNotFound) {
-			log.Info("url not found", slog.String("alias", req.Alias))
-
-			render.JSON(w, r, response.Error("url not found"))
-
-			return
-		}
+		err := urlDeleter.DeleteURL(alias)
 		if err != nil {
+			if errors.Is(err, storage.ErrURLNotFound) {
+				log.Info("url not found", slog.String("alias", alias))
+				render.JSON(w, r, Error("url not found"))
+				return
+			}
+
 			log.Error("failed to delete url", sl.Err(err))
-
-			render.JSON(w, r, response.Error("failed to delete url"))
-
+			render.JSON(w, r, Error("failed to delete url"))
 			return
 		}
 
-		log.Info("url deleted", slog.String("alias", req.Alias))
+		log.Info("url deleted", slog.String("alias", alias))
 
 		render.JSON(w, r, Response{
-			Response: response.OK(),
+			Status: "deleted",
 		})
+	}
+}
+
+// Error возвращает Response с ошибкой
+func Error(msg string) Response {
+	return Response{
+		Status: "error",
+		Error:  msg,
 	}
 }

@@ -19,7 +19,7 @@ import (
 	mwLogger "urlshortener/internal/http-server/middleware/logger"
 	"urlshortener/internal/lib/logger/handlers/slogpretty"
 	"urlshortener/internal/lib/logger/sl"
-	"urlshortener/internal/storage/sqlite"
+	"urlshortener/internal/storage/postgres"
 )
 
 const (
@@ -31,6 +31,10 @@ const (
 func main() {
 	cfg := config.MustLoad()
 
+	if cfg.Address == "" {
+		cfg.Address = "0.0.0.0:8082"
+	}
+
 	log := setupLogger(cfg.Env)
 
 	log.Info(
@@ -40,11 +44,42 @@ func main() {
 	)
 	log.Debug("debug messages are enabled")
 
-	storage, err := sqlite.New(cfg.StoragePath)
-	if err != nil {
-		log.Error("failed to init storage", sl.Err(err))
+	// Определяем интерфейс для хранилища
+	type Storage interface {
+		SaveURL(urlToSave string, alias string) error
+		GetURL(alias string) (string, error)
+		DeleteURL(alias string) error
+		Close() error
+	}
+
+	var storage Storage
+	var err error
+
+	switch cfg.Storage.Type {
+	case "postgres":
+		pgCfg := cfg.Storage.Postgres
+		storage, err = postgres.New(
+			pgCfg.Host,
+			pgCfg.Port,
+			pgCfg.User,
+			pgCfg.Password,
+			pgCfg.DBName,
+		)
+		if err != nil {
+			log.Error("failed to init postgres storage", sl.Err(err))
+			os.Exit(1)
+		}
+		log.Info("using PostgreSQL storage")
+	default:
+		log.Error("unknown storage type", slog.String("type", cfg.Storage.Type))
 		os.Exit(1)
 	}
+
+	defer func() {
+		if err := storage.Close(); err != nil {
+			log.Error("failed to close storage", sl.Err(err))
+		}
+	}()
 
 	router := chi.NewRouter()
 
@@ -54,15 +89,26 @@ func main() {
 	router.Use(middleware.Recoverer)
 	router.Use(middleware.URLFormat)
 
-	router.Route("/url", func(r chi.Router) {
-		r.Use(middleware.BasicAuth("url-shortener", map[string]string{
-			cfg.HTTPServer.User: cfg.HTTPServer.Password,
-		}))
-
-		r.Post("/", save.New(log, storage))
-		r.Delete("/", delete.New(log, storage))
+	// Public routes
+	router.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("URL Shortener API"))
+	})
+	router.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	// Protected API routes
+	router.Route("/api/v1", func(r chi.Router) {
+		// Временно отключаем Basic Auth для тестирования
+		// r.Use(middleware.BasicAuth("url-shortener", map[string]string{
+		// 	cfg.HTTPServer.User: cfg.HTTPServer.Password,
+		// }))
+
+		r.Post("/urls", save.New(log, storage))
+		r.Delete("/urls/{alias}", delete.New(log, storage))
+	})
+
+	// Redirect route
 	router.Get("/{alias}", redirect.New(log, storage))
 
 	log.Info("starting server", slog.String("address", cfg.HTTPServer.Address))
@@ -79,8 +125,8 @@ func main() {
 	}
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil {
-			log.Error("failed to start server")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("failed to start server", sl.Err(err))
 		}
 	}()
 
@@ -89,17 +135,13 @@ func main() {
 	<-done
 	log.Info("stopping server")
 
-	// TODO: move timeout to config
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("failed to stop server", sl.Err(err))
-
 		return
 	}
-
-	// TODO: close storage
 
 	log.Info("server stopped")
 }
@@ -118,7 +160,7 @@ func setupLogger(env string) *slog.Logger {
 		log = slog.New(
 			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
 		)
-	default: // If env config is invalid, set prod settings by default due to security
+	default:
 		log = slog.New(
 			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
 		)

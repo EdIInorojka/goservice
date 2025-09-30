@@ -1,40 +1,64 @@
 package config
 
 import (
-	"github.com/ilyakaznacheev/cleanenv"
-	"log"
 	"os"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Env         string     `yaml:"env" env:"ENV" env-default:"prod" env-required:"true"`
-	StoragePath string     `yaml:"storage_path" env-required:"true"`
-	HTTPServer  HTTPServer `yaml:"http_server"`
+	Env        string        `yaml:"env"`
+	Storage    StorageConfig `yaml:"storage"`
+	HTTPServer `yaml:"http_server"`
+}
+
+type StorageConfig struct {
+	Type     string         `yaml:"type"`
+	SQLite   SQLiteConfig   `yaml:"sqlite"`
+	Postgres PostgresConfig `yaml:"postgres"`
+}
+
+type SQLiteConfig struct {
+	Path string `yaml:"path"`
+}
+
+type PostgresConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	DBName   string `yaml:"dbname"`
+	SSLMode  string `yaml:"sslmode"`
 }
 
 type HTTPServer struct {
-	Address     string        `yaml:"address" env-default:"localhost:8080"`
-	Timeout     time.Duration `yaml:"timeout" env-default:"4s"`
-	IdleTimeout time.Duration `yaml:"idle_timeout" env-default:"60s"`
-	User        string        `yaml:"user" env-required:"true"`
-	Password    string        `yaml:"password" env-required:"true" env:"HTTP_SERVER_PASSWORD"`
+	Address     string        `yaml:"address"`
+	User        string        `yaml:"user"`
+	Password    string        `yaml:"password"`
+	Timeout     time.Duration `yaml:"timeout"`
+	IdleTimeout time.Duration `yaml:"idle_timeout"`
 }
 
 func MustLoad() *Config {
 	configPath := os.Getenv("CONFIG_PATH")
 	if configPath == "" {
-		configPath = "config/prod.yaml"
+		configPath = "config/docker.yaml"
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		log.Fatalf("config file does not exist: %s", configPath)
+		panic("config file does not exist: " + configPath)
+	}
+
+	yamlFile, err := os.ReadFile(configPath)
+	if err != nil {
+		panic("failed to read config file: " + err.Error())
 	}
 
 	var cfg Config
 
-	if err := cleanenv.ReadConfig(configPath, &cfg); err != nil {
-		log.Fatalf("cannot read config: %s", err)
+	if err := yaml.Unmarshal(yamlFile, &cfg); err != nil {
+		panic("failed to parse config: " + err.Error())
 	}
 
 	return &cfg
